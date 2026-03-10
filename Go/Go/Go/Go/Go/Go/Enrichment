@@ -1,0 +1,990 @@
+#####GO
+library(circlize)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(dplyr)
+library(ggplot2)
+
+setwd("/Volumes/LENOVO/Thesis 5")
+kegg_data <- read.table("KEGG.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE, fill = TRUE)
+
+required_cols <- c("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "Count", "geneID")
+missing_cols <- setdiff(required_cols, colnames(kegg_data))
+if (length(missing_cols) > 0) {
+  actual_cols <- colnames(kegg_data)
+  col_mapping <- list(
+    GeneRatio = c("GeneRatio", "Gene.Ratio", "geneRatio"),
+    BgRatio = c("BgRatio", "Bg.Ratio", "bgRatio"),
+    pvalue = c("pvalue", "p.value", "P-value", "P.value"),
+    Count = c("Count", "count", "GeneCount"),
+    geneID = c("geneID", "gene.ID", "genes", "geneID")
+  )
+  for (target in names(col_mapping)) {
+    if (!target %in% actual_cols) {
+      for (possible in col_mapping[[target]]) {
+        if (possible %in% actual_cols) {
+          kegg_data[[target]] <- kegg_data[[possible]]
+          break
+        }
+      }
+    }
+  }
+}
+
+kegg_data$GeneRatio_num <- sapply(strsplit(kegg_data$GeneRatio, "/"), function(x) as.numeric(x[1]))
+kegg_data$BgRatio_num <- sapply(strsplit(kegg_data$BgRatio, "/"), function(x) as.numeric(x[1]))
+kegg_data$RichFactor <- kegg_data$GeneRatio_num / kegg_data$BgRatio_num
+kegg_data$log10pval <- -log10(kegg_data$pvalue)
+
+showNum <- min(15, nrow(kegg_data))
+kegg_data_sorted <- kegg_data[order(kegg_data$pvalue), ]
+data <- head(kegg_data_sorted, showNum)
+
+Pathway.col <- c("#90EE90", "#E7B800", "#00AFBB")
+main.col <- rep(Pathway.col[1], nrow(data))
+
+if ("category" %in% colnames(data)) {
+  categories <- unique(data$category)
+  category_colors <- brewer.pal(length(categories), "Set3")
+  names(category_colors) <- categories
+  main.col <- category_colors[data$category]
+} else if ("subcategory" %in% colnames(data)) {
+  subcategories <- unique(data$subcategory)
+  subcategory_colors <- brewer.pal(length(subcategories), "Set2")
+  names(subcategory_colors) <- subcategories
+  main.col <- subcategory_colors[data$subcategory]
+}
+
+BgGene <- data$BgRatio_num
+Gene <- data$GeneRatio_num
+ratio <- data$RichFactor
+
+logpvalue <- data$log10pval
+logpvalue.col <- brewer.pal(n = 8, name = "Reds")
+f <- colorRamp2(breaks = seq(0, max(c(logpvalue, 20)), length.out = 8), colors = logpvalue.col)
+BgGene.col <- f(logpvalue)
+
+df <- data.frame(
+  KEGG = paste0(data$ID, "\n", substr(data$Description, 1, 40)),
+  start = 1,
+  end = max(BgGene)
+)
+rownames(df) <- df$KEGG
+
+bed2 <- data.frame(
+  KEGG = df$KEGG,
+  start = 1,
+  end = BgGene,
+  BgGene = BgGene,
+  BgGene.col = BgGene.col
+)
+
+bed3 <- data.frame(
+  KEGG = df$KEGG,
+  start = 1,
+  end = Gene,
+  BgGene = Gene
+)
+
+bed4 <- data.frame(
+  KEGG = df$KEGG,
+  start = 1,
+  end = max(BgGene),
+  ratio = ratio,
+  col = main.col
+)
+
+if (max(ratio) > 0) {
+  bed4$ratio <- bed4$ratio / max(bed4$ratio) * 9.5
+} else {
+  bed4$ratio <- 1
+}
+
+pdf(file = "KEGG_circlize_enhanced.pdf", width = 13, height = 13)
+par(omi = c(0.1, 0.1, 0.1, 2.0))
+
+circos.genomicInitialize(df, plotType = "none")
+
+circos.trackPlotRegion(ylim = c(0, 1), panel.fun = function(x, y) {
+  sector.index <- get.cell.meta.data("sector.index")
+  xlim <- get.cell.meta.data("xlim")
+  ylim <- get.cell.meta.data("ylim")
+  circos.text(
+    mean(xlim), 
+    mean(ylim), 
+    sector.index, 
+    cex = 0.65, 
+    facing = "bending.inside", 
+    niceFacing = TRUE
+  )
+}, track.height = 0.09, bg.border = NA, bg.col = main.col)
+
+for (si in get.all.sector.index()) {
+  circos.axis(
+    h = "top", 
+    labels.cex = 0.5, 
+    sector.index = si,
+    track.index = 1,
+    major.at = pretty(c(0, max(BgGene)), n = 5),
+    labels.facing = "clockwise"
+  )
+}
+
+circos.genomicTrack(
+  bed2, 
+  ylim = c(0, 1), 
+  track.height = 0.13,
+  bg.border = "white", 
+  bg.col = "grey95",
+  panel.fun = function(region, value, ...) {
+    i <- getI(...)
+    circos.genomicRect(
+      region, 
+      value, 
+      ytop = 0, 
+      ybottom = 1, 
+      col = value[, 2], 
+      border = NA, 
+      ...
+    )
+    circos.genomicText(
+      region, 
+      value, 
+      y = 0.5, 
+      labels = value[, 1], 
+      adj = 0,
+      cex = 0.6, 
+      ...
+    )
+  }
+)
+
+circos.genomicTrack(
+  bed3, 
+  ylim = c(0, 1), 
+  track.height = 0.13,
+  bg.border = "white", 
+  bg.col = "grey95",
+  panel.fun = function(region, value, ...) {
+    i <- getI(...)
+    circos.genomicRect(
+      region, 
+      value, 
+      ytop = 0, 
+      ybottom = 1, 
+      col = '#BA55D3', 
+      border = NA, 
+      ...
+    )
+    circos.genomicText(
+      region, 
+      value, 
+      y = 0.5, 
+      labels = value[, 1], 
+      cex = 0.7,
+      adj = 0, 
+      ...
+    )
+  }
+)
+
+circos.genomicTrack(
+  bed4, 
+  ylim = c(0, 10), 
+  track.height = 0.4,
+  bg.border = "white", 
+  bg.col = "grey90",
+  panel.fun = function(region, value, ...) {
+    cell.xlim <- get.cell.meta.data("cell.xlim")
+    cell.ylim <- get.cell.meta.data("cell.ylim")
+    for (j in 1:9) {
+      y <- cell.ylim[1] + (cell.ylim[2] - cell.ylim[1]) / 10 * j
+      circos.lines(cell.xlim, c(y, y), col = "#FFFFFF", lwd = 0.5)
+    }
+    x_vals <- seq(cell.xlim[1], cell.xlim[2], length.out = 11)
+    for (x in x_vals) {
+      circos.lines(c(x, x), cell.ylim, col = "#FFFFFF", lwd = 0.5)
+    }
+    circos.genomicRect(
+      region, 
+      value, 
+      ytop = 0, 
+      ybottom = value[, 1], 
+      col = value[, 2], 
+      border = NA, 
+      ...
+    )
+  }
+)
+
+circos.clear()
+
+middle.legend <- Legend(
+  labels = c('Background Genes', 'Enriched Genes', 'Rich Factor'),
+  type = "points", 
+  pch = c(15, 15, 17),
+  legend_gp = gpar(col = c('pink', '#BA55D3', Pathway.col[1])),
+  title = "", 
+  nrow = 3, 
+  size = unit(4, "mm")
+)
+
+circle_size <- unit(1, "snpc")
+draw(middle.legend, x = circle_size * 0.42)
+
+if ("category" %in% colnames(data) || "subcategory" %in% colnames(data)) {
+  if ("category" %in% colnames(data)) {
+    legend_items <- unique(data$category)
+    legend_title <- "Category"
+    legend_colors <- category_colors
+  } else {
+    legend_items <- unique(data$subcategory)
+    legend_title <- "Subcategory"
+    legend_colors <- subcategory_colors
+  }
+  main.legend <- Legend(
+    labels = legend_items, 
+    type = "points", 
+    pch = 15,
+    legend_gp = gpar(col = legend_colors[legend_items]), 
+    title = legend_title,
+    title_position = "topcenter",
+    nrow = min(3, length(legend_items)), 
+    size = unit(4, "mm"),
+    grid_height = unit(6, "mm"),
+    grid_width = unit(6, "mm")
+  )
+} else {
+  main.legend <- Legend(
+    labels = "KEGG Pathways", 
+    type = "points", 
+    pch = 15,
+    legend_gp = gpar(col = Pathway.col[1]), 
+    title = "Pathway Type",
+    title_position = "topcenter",
+    nrow = 1, 
+    size = unit(4, "mm"),
+    grid_height = unit(6, "mm"),
+    grid_width = unit(6, "mm")
+  )
+}
+
+pvalue_breaks <- c(0, 5, 10, 15, 20, 25, 30, 35)
+pvalue_labels <- c('0-5', '5-10', '10-15', '15-20', '20-25', '25-30', '30-35', '≥35')
+n_breaks <- min(8, length(which(pvalue_breaks <= max(logpvalue, na.rm = TRUE))))
+
+logp.legend <- Legend(
+  at = 1:n_breaks,
+  labels = pvalue_labels[1:n_breaks],
+  type = "points", 
+  pch = 16,
+  legend_gp = gpar(col = logpvalue.col[1:n_breaks]),
+  title = "-log₁₀(P value)",
+  title_position = "topcenter",
+  grid_height = unit(6, "mm"),
+  grid_width = unit(6, "mm"),
+  size = unit(4, "mm")
+)
+
+lgd <- packLegend(main.legend, logp.legend, direction = "vertical")
+draw(lgd, x = circle_size * 0.85, y = circle_size * 0.5, just = "left")
+dev.off()
+
+pdf(file = "KEGG_bubble_plot.pdf", width = 12, height = 10)
+bubble_data <- data.frame(
+  Description = data$Description,
+  GeneRatio = data$RichFactor,
+  Count = data$Count,
+  pvalue = data$pvalue,
+  log10pval = data$log10pval
+)
+bubble_data$Description <- substr(bubble_data$Description, 1, 50)
+p <- ggplot(bubble_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio))) +
+  geom_point(aes(size = Count, color = log10pval), alpha = 0.8) +
+  scale_color_gradientn(colors = brewer.pal(9, "Reds"), name = "-log10(P value)") +
+  scale_size_continuous(range = c(3, 10), name = "Gene Count") +
+  labs(x = "Rich Factor", y = "Pathway", title = "KEGG Pathway Enrichment") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "right",
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 10, face = "bold")
+  )
+print(p)
+dev.off()
+
+pdf(file = "KEGG_bar_plot.pdf", width = 12, height = 10)
+bar_data <- data.frame(
+  Description = factor(data$Description, levels = rev(data$Description)),
+  Count = data$Count,
+  log10pval = data$log10pval
+)
+levels(bar_data$Description) <- substr(levels(bar_data$Description), 1, 60)
+p_bar <- ggplot(bar_data, aes(x = Count, y = Description, fill = log10pval)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_gradientn(colors = brewer.pal(9, "Reds"), name = "-log10(P value)") +
+  labs(x = "Gene Count", y = "Pathway", title = "KEGG Pathway Enrichment") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "right",
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 10, face = "bold")
+  )
+print(p_bar)
+dev.off()
+
+summary_data <- data.frame(
+  Pathway_ID = data$ID,
+  Pathway_Name = substr(data$Description, 1, 60),
+  Category = if ("category" %in% colnames(data)) data$category else "N/A",
+  Subcategory = if ("subcategory" %in% colnames(data)) data$subcategory else "N/A",
+  Gene_Count = data$Count,
+  Rich_Factor = round(data$RichFactor, 3),
+  P_Value = format(data$pvalue, scientific = TRUE, digits = 3),
+  FDR = if ("p.adjust" %in% colnames(data)) format(data$p.adjust, scientific = TRUE, digits = 3) else "N/A",
+  log10_Pvalue = round(data$log10pval, 2)
+)
+
+write.table(summary_data, file = "KEGG_summary_table.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+#####KEGG
+library(circlize)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(ggsankey)
+library(cowplot)
+
+setwd("/Volumes/LENOVO/Thesis 5")
+
+kegg_data <- read.table("KEGG.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE, fill = TRUE)
+
+required_cols <- c("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "Count", "geneID")
+missing_cols <- setdiff(required_cols, colnames(kegg_data))
+if (length(missing_cols) > 0) {
+  actual_cols <- colnames(kegg_data)
+  col_mapping <- list(
+    GeneRatio = c("GeneRatio", "Gene.Ratio", "geneRatio"),
+    BgRatio = c("BgRatio", "Bg.Ratio", "bgRatio"),
+    pvalue = c("pvalue", "p.value", "P-value", "P.value"),
+    Count = c("Count", "count", "GeneCount"),
+    geneID = c("geneID", "gene.ID", "genes", "geneID")
+  )
+  for (target in names(col_mapping)) {
+    if (!target %in% actual_cols) {
+      for (possible in col_mapping[[target]]) {
+        if (possible %in% actual_cols) {
+          kegg_data[[target]] <- kegg_data[[possible]]
+          break
+        }
+      }
+    }
+  }
+}
+
+kegg_data$GeneRatio_num <- sapply(strsplit(kegg_data$GeneRatio, "/"), function(x) as.numeric(x[1]))
+kegg_data$BgRatio_num <- sapply(strsplit(kegg_data$BgRatio, "/"), function(x) as.numeric(x[1]))
+kegg_data$RichFactor <- kegg_data$GeneRatio_num / kegg_data$BgRatio_num
+kegg_data$log10pval <- -log10(kegg_data$pvalue)
+
+showNum <- min(15, nrow(kegg_data))
+kegg_data_sorted <- kegg_data[order(kegg_data$pvalue), ]
+data <- head(kegg_data_sorted, showNum)
+
+Pathway.col <- c("#90EE90", "#E7B800", "#00AFBB")
+main.col <- rep(Pathway.col[1], nrow(data))
+
+if ("category" %in% colnames(data)) {
+  categories <- unique(data$category)
+  category_colors <- brewer.pal(length(categories), "Set3")
+  names(category_colors) <- categories
+  main.col <- category_colors[data$category]
+} else if ("subcategory" %in% colnames(data)) {
+  subcategories <- unique(data$subcategory)
+  subcategory_colors <- brewer.pal(length(subcategories), "Set2")
+  names(subcategory_colors) <- subcategories
+  main.col <- subcategory_colors[data$subcategory]
+}
+
+BgGene <- data$BgRatio_num
+Gene <- data$GeneRatio_num
+ratio <- data$RichFactor
+
+logpvalue <- data$log10pval
+logpvalue.col <- brewer.pal(n = 8, name = "Reds")
+f <- colorRamp2(breaks = seq(0, max(c(logpvalue, 20)), length.out = 8), colors = logpvalue.col)
+BgGene.col <- f(logpvalue)
+
+df <- data.frame(
+  KEGG = paste0(data$ID, "\n", substr(data$Description, 1, 40)),
+  start = 1,
+  end = max(BgGene)
+)
+rownames(df) <- df$KEGG
+
+bed2 <- data.frame(
+  KEGG = df$KEGG,
+  start = 1,
+  end = BgGene,
+  BgGene = BgGene,
+  BgGene.col = BgGene.col
+)
+
+bed3 <- data.frame(
+  KEGG = df$KEGG,
+  start = 1,
+  end = Gene,
+  BgGene = Gene
+)
+
+bed4 <- data.frame(
+  KEGG = df$KEGG,
+  start = 1,
+  end = max(BgGene),
+  ratio = ratio,
+  col = main.col
+)
+
+if (max(ratio) > 0) {
+  bed4$ratio <- bed4$ratio / max(bed4$ratio) * 9.5
+} else {
+  bed4$ratio <- 1
+}
+
+pdf(file = "KEGG_circlize_enhanced.pdf", width = 13, height = 13)
+par(omi = c(0.1, 0.1, 0.1, 2.0))
+
+circos.genomicInitialize(df, plotType = "none")
+
+circos.trackPlotRegion(ylim = c(0, 1), panel.fun = function(x, y) {
+  sector.index <- get.cell.meta.data("sector.index")
+  xlim <- get.cell.meta.data("xlim")
+  ylim <- get.cell.meta.data("ylim")
+  circos.text(
+    mean(xlim), 
+    mean(ylim), 
+    sector.index, 
+    cex = 0.65, 
+    facing = "bending.inside", 
+    niceFacing = TRUE
+  )
+}, track.height = 0.09, bg.border = NA, bg.col = main.col)
+
+for (si in get.all.sector.index()) {
+  circos.axis(
+    h = "top", 
+    labels.cex = 0.5, 
+    sector.index = si,
+    track.index = 1,
+    major.at = pretty(c(0, max(BgGene)), n = 5),
+    labels.facing = "clockwise"
+  )
+}
+
+circos.genomicTrack(
+  bed2, 
+  ylim = c(0, 1), 
+  track.height = 0.13,
+  bg.border = "white", 
+  bg.col = "grey95",
+  panel.fun = function(region, value, ...) {
+    i <- getI(...)
+    circos.genomicRect(
+      region, 
+      value, 
+      ytop = 0, 
+      ybottom = 1, 
+      col = value[, 2], 
+      border = NA, 
+      ...
+    )
+    circos.genomicText(
+      region, 
+      value, 
+      y = 0.5, 
+      labels = value[, 1], 
+      adj = 0,
+      cex = 0.6, 
+      ...
+    )
+  }
+)
+
+circos.genomicTrack(
+  bed3, 
+  ylim = c(0, 1), 
+  track.height = 0.13,
+  bg.border = "white", 
+  bg.col = "grey95",
+  panel.fun = function(region, value, ...) {
+    i <- getI(...)
+    circos.genomicRect(
+      region, 
+      value, 
+      ytop = 0, 
+      ybottom = 1, 
+      col = '#BA55D3', 
+      border = NA, 
+      ...
+    )
+    circos.genomicText(
+      region, 
+      value, 
+      y = 0.5, 
+      labels = value[, 1], 
+      cex = 0.7,
+      adj = 0, 
+      ...
+    )
+  }
+)
+
+circos.genomicTrack(
+  bed4, 
+  ylim = c(0, 10), 
+  track.height = 0.4,
+  bg.border = "white", 
+  bg.col = "grey90",
+  panel.fun = function(region, value, ...) {
+    cell.xlim <- get.cell.meta.data("cell.xlim")
+    cell.ylim <- get.cell.meta.data("cell.ylim")
+    for (j in 1:9) {
+      y <- cell.ylim[1] + (cell.ylim[2] - cell.ylim[1]) / 10 * j
+      circos.lines(cell.xlim, c(y, y), col = "#FFFFFF", lwd = 0.5)
+    }
+    x_vals <- seq(cell.xlim[1], cell.xlim[2], length.out = 11)
+    for (x in x_vals) {
+      circos.lines(c(x, x), cell.ylim, col = "#FFFFFF", lwd = 0.5)
+    }
+    circos.genomicRect(
+      region, 
+      value, 
+      ytop = 0, 
+      ybottom = value[, 1], 
+      col = value[, 2], 
+      border = NA, 
+      ...
+    )
+  }
+)
+
+circos.clear()
+
+middle.legend <- Legend(
+  labels = c('Background Genes', 'Enriched Genes', 'Rich Factor'),
+  type = "points", 
+  pch = c(15, 15, 17),
+  legend_gp = gpar(col = c('pink', '#BA55D3', Pathway.col[1])),
+  title = "", 
+  nrow = 3, 
+  size = unit(4, "mm")
+)
+
+circle_size <- unit(1, "snpc")
+draw(middle.legend, x = circle_size * 0.42)
+
+if ("category" %in% colnames(data) || "subcategory" %in% colnames(data)) {
+  if ("category" %in% colnames(data)) {
+    legend_items <- unique(data$category)
+    legend_title <- "Category"
+    legend_colors <- category_colors
+  } else {
+    legend_items <- unique(data$subcategory)
+    legend_title <- "Subcategory"
+    legend_colors <- subcategory_colors
+  }
+  main.legend <- Legend(
+    labels = legend_items, 
+    type = "points", 
+    pch = 15,
+    legend_gp = gpar(col = legend_colors[legend_items]), 
+    title = legend_title,
+    title_position = "topcenter",
+    nrow = min(3, length(legend_items)), 
+    size = unit(4, "mm"),
+    grid_height = unit(6, "mm"),
+    grid_width = unit(6, "mm")
+  )
+} else {
+  main.legend <- Legend(
+    labels = "KEGG Pathways", 
+    type = "points", 
+    pch = 15,
+    legend_gp = gpar(col = Pathway.col[1]), 
+    title = "Pathway Type",
+    title_position = "topcenter",
+    nrow = 1, 
+    size = unit(4, "mm"),
+    grid_height = unit(6, "mm"),
+    grid_width = unit(6, "mm")
+  )
+}
+
+pvalue_breaks <- c(0, 5, 10, 15, 20, 25, 30, 35)
+pvalue_labels <- c('0-5', '5-10', '10-15', '15-20', '20-25', '25-30', '30-35', '≥35')
+n_breaks <- min(8, length(which(pvalue_breaks <= max(logpvalue, na.rm = TRUE))))
+
+logp.legend <- Legend(
+  at = 1:n_breaks,
+  labels = pvalue_labels[1:n_breaks],
+  type = "points", 
+  pch = 16,
+  legend_gp = gpar(col = logpvalue.col[1:n_breaks]),
+  title = "-log₁₀(P value)",
+  title_position = "topcenter",
+  grid_height = unit(6, "mm"),
+  grid_width = unit(6, "mm"),
+  size = unit(4, "mm")
+)
+
+lgd <- packLegend(main.legend, logp.legend, direction = "vertical")
+draw(lgd, x = circle_size * 0.85, y = circle_size * 0.5, just = "left")
+dev.off()
+
+pdf(file = "KEGG_bubble_plot.pdf", width = 12, height = 10)
+bubble_data <- data.frame(
+  Description = data$Description,
+  GeneRatio = data$RichFactor,
+  Count = data$Count,
+  pvalue = data$pvalue,
+  log10pval = data$log10pval
+)
+bubble_data$Description <- substr(bubble_data$Description, 1, 50)
+p <- ggplot(bubble_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio))) +
+  geom_point(aes(size = Count, color = log10pval), alpha = 0.8) +
+  scale_color_gradientn(colors = brewer.pal(9, "Reds"), name = "-log10(P value)") +
+  scale_size_continuous(range = c(3, 10), name = "Gene Count") +
+  labs(x = "Rich Factor", y = "Pathway", title = "KEGG Pathway Enrichment") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "right",
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 10, face = "bold")
+  )
+print(p)
+dev.off()
+
+pdf(file = "KEGG_bar_plot.pdf", width = 12, height = 10)
+bar_data <- data.frame(
+  Description = factor(data$Description, levels = rev(data$Description)),
+  Count = data$Count,
+  log10pval = data$log10pval
+)
+levels(bar_data$Description) <- substr(levels(bar_data$Description), 1, 60)
+p_bar <- ggplot(bar_data, aes(x = Count, y = Description, fill = log10pval)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_gradientn(colors = brewer.pal(9, "Reds"), name = "-log10(P value)") +
+  labs(x = "Gene Count", y = "Pathway", title = "KEGG Pathway Enrichment") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "right",
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 10, face = "bold")
+  )
+print(p_bar)
+dev.off()
+
+KEGG_selected <- kegg_data[1:min(5, nrow(kegg_data)), ]
+kegg <- KEGG_selected[, c("Description", "Count", "pvalue", "GeneRatio")]
+kegg$GeneRatio_numeric <- sapply(kegg$GeneRatio, function(x) {
+  parts <- strsplit(as.character(x), "/")[[1]]
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+sankey <- KEGG_selected[, c("Description", "geneID")]
+sankey <- sankey %>%
+  separate_rows(geneID, sep = "/") %>%
+  filter(!is.na(geneID) & geneID != "" & geneID != "NA")
+
+kegg2 <- kegg[nrow(kegg):1, ]
+kegg2 <- kegg2 %>%
+  mutate(
+    ymax = cumsum(Count),
+    ymin = ymax - Count,
+    label = (ymin + ymax) / 2,
+    Description_short = ifelse(
+      nchar(Description) > 40,
+      paste0(substr(Description, 1, 37), "..."),
+      Description
+    )
+  )
+
+mytheme <- theme(
+  axis.title = element_text(size = 13),
+  axis.text = element_text(size = 11),
+  axis.text.y = element_blank(),
+  axis.ticks.y = element_blank(),
+  legend.title = element_text(size = 13),
+  legend.text = element_text(size = 11),
+  plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+)
+
+p_bubble <- ggplot() +
+  geom_point(
+    data = kegg2,
+    aes(
+      x = -log10(pvalue),
+      y = label,
+      size = Count,
+      color = GeneRatio_numeric
+    ),
+    alpha = 0.8
+  ) +
+  scale_size_continuous(
+    name = "Gene Count",
+    range = c(3, 10),
+    breaks = pretty(range(kegg2$Count))
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.1)),
+    limits = c(0, max(kegg2$ymax) + 5)
+  ) +
+  scale_x_continuous(
+    limits = c(0.1, ceiling(max(-log10(kegg2$pvalue))) + 1)
+  ) +
+  scale_color_gradientn(
+    name = "Gene Ratio",
+    colors = brewer.pal(9, "Reds"),
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +
+  labs(
+    x = "-log10(P-value)",
+    y = "",
+    title = "KEGG Pathway Enrichment"
+  ) +
+  theme_bw() +
+  mytheme +
+  geom_text(
+    data = kegg2,
+    aes(
+      x = -log10(pvalue) + max(-log10(pvalue)) * 0.05,
+      y = label,
+      label = Description_short
+    ),
+    hjust = 0,
+    size = 3.5,
+    color = "black",
+    fontface = "italic"
+  )
+
+ggsave("KEGG_Bubble_Plot_Final.pdf", p_bubble, width = 8, height = 9, dpi = 600)
+
+df <- sankey %>%
+  make_long(geneID, Description)
+
+pathway_levels <- unique(sankey$Description) %>% rev()
+gene_levels <- unique(sankey$geneID) %>% rev()
+df$node <- factor(df$node, levels = c(pathway_levels, gene_levels))
+
+n_colors <- length(unique(df$node))
+mycol <- if (n_colors <= 12) {
+  brewer.pal(max(3, n_colors), "Set3")
+} else {
+  colorRampPalette(brewer.pal(12, "Set3"))(n_colors)
+}
+
+tryCatch({
+  p_sankey <- ggplot(df, aes(
+    x = x,
+    next_x = next_x,
+    node = node,
+    next_node = next_node,
+    fill = node,
+    label = node
+  )) +
+    geom_sankey(
+      flow.alpha = 0.5,
+      flow.fill = 'grey70',
+      flow.color = 'grey50',
+      smooth = 8,
+      width = 0.08
+    ) +
+    geom_sankey_text(
+      size = 3.0,
+      color = "black"
+    ) +
+    scale_fill_manual(values = mycol) +
+    theme_void() +
+    theme(
+      legend.position = 'none',
+      plot.margin = margin(0, 80, 0, 0),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5, margin = margin(b = 10))
+    ) +
+    labs(title = "Gene-Pathway Associations")
+  
+  ggsave("KEGG_Sankey_Plot_MethodA.pdf", p_sankey, width = 12, height = 9, dpi = 600)
+  
+}, error = function(e) {
+  p_sankey_base <- ggplot(df, aes(
+    x = x,
+    next_x = next_x,
+    node = node,
+    next_node = next_node,
+    fill = node
+  )) +
+    geom_sankey(
+      flow.alpha = 0.5,
+      flow.fill = 'grey70',
+      flow.color = 'grey50',
+      smooth = 8,
+      width = 0.08,
+      show.legend = FALSE
+    ) +
+    scale_fill_manual(values = mycol) +
+    theme_void() +
+    theme(
+      legend.position = 'none',
+      plot.margin = margin(0, 80, 0, 0)
+    )
+  
+  create_sankey_labels <- function(sankey_df) {
+    all_genes <- unique(sankey_df$geneID)
+    all_pathways <- unique(sankey_df$Description)
+    
+    gene_labels <- data.frame(
+      label = all_genes,
+      x = 0.15,
+      y = seq(0.15, 0.85, length.out = length(all_genes)),
+      hjust = 1,
+      type = "Gene",
+      stringsAsFactors = FALSE
+    )
+    
+    pathway_labels <- data.frame(
+      label = all_pathways,
+      x = 0.85,
+      y = seq(0.15, 0.85, length.out = length(all_pathways)),
+      hjust = 0,
+      type = "Pathway",
+      stringsAsFactors = FALSE
+    )
+    
+    rbind(gene_labels, pathway_labels)
+  }
+  
+  label_data <- create_sankey_labels(sankey)
+  
+  p_sankey <- p_sankey_base +
+    geom_text(
+      data = label_data[label_data$type == "Gene", ],
+      aes(x = x, y = y, label = label),
+      hjust = 1,
+      size = 2.8,
+      color = "black",
+      nudge_x = -0.02,
+      check_overlap = FALSE
+    ) +
+    geom_text(
+      data = label_data[label_data$type == "Pathway", ],
+      aes(x = x, y = y, label = label),
+      hjust = 0,
+      size = 3.0,
+      color = "black",
+      fontface = "italic",
+      nudge_x = 0.02,
+      check_overlap = FALSE
+    ) +
+    scale_x_continuous(limits = c(-0.1, 1.1)) +
+    labs(title = "Gene-Pathway Associations") +
+    theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5, margin = margin(b = 10)))
+  
+  ggsave("KEGG_Sankey_Plot_MethodB.pdf", p_sankey, width = 12, height = 9, dpi = 600)
+})
+
+if(file.exists("KEGG_Sankey_Plot_MethodA.pdf")) {
+  tryCatch({
+    p_sankey_final <- ggplot(df, aes(
+      x = x,
+      next_x = next_x,
+      node = node,
+      next_node = next_node,
+      fill = node,
+      label = node
+    )) +
+      geom_sankey(
+        flow.alpha = 0.5,
+        flow.fill = 'grey70',
+        flow.color = 'grey50',
+        smooth = 8,
+        width = 0.08
+      ) +
+      geom_sankey_text(
+        size = 3.0,
+        color = "black"
+      ) +
+      scale_fill_manual(values = mycol) +
+      theme_void() +
+      theme(
+        legend.position = 'none',
+        plot.margin = margin(0, 80, 0, 0)
+      )
+    
+    p_combined <- ggdraw() + 
+      draw_plot(p_sankey_final) + 
+      draw_plot(
+        p_bubble, 
+        scale = 0.5, 
+        x = 0.50, 
+        y = -0.17, 
+        width = 0.68, 
+        height = 1.3
+      ) +
+      draw_label(
+        "KEGG Pathway Analysis", 
+        x = 0.5, 
+        y = 0.97, 
+        size = 16, 
+        fontface = "bold"
+      )
+    
+    ggsave("KEGG_Combined_Plot.pdf", p_combined, width = 14, height = 9, dpi = 600)
+  }, error = function(e) {})
+}
+
+summary_data <- data.frame(
+  Pathway_ID = data$ID,
+  Pathway_Name = substr(data$Description, 1, 60),
+  Category = if ("category" %in% colnames(data)) data$category else "N/A",
+  Subcategory = if ("subcategory" %in% colnames(data)) data$subcategory else "N/A",
+  Gene_Count = data$Count,
+  Rich_Factor = round(data$RichFactor, 3),
+  P_Value = format(data$pvalue, scientific = TRUE, digits = 3),
+  FDR = if ("p.adjust" %in% colnames(data)) format(data$p.adjust, scientific = TRUE, digits = 3) else "N/A",
+  log10_Pvalue = round(data$log10pval, 2)
+)
+
+write.table(summary_data, file = "KEGG_summary_table.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+summary_table <- data.frame(
+  Rank = 1:nrow(kegg2),
+  Pathway = kegg2$Description_short,
+  Pathway_ID = KEGG_selected$ID,
+  Category = KEGG_selected$category,
+  Gene_Count = kegg2$Count,
+  P_Value = formatC(kegg2$pvalue, format = "e", digits = 2),
+  `-log10_P` = round(-log10(kegg2$pvalue), 2),
+  Gene_Ratio = round(kegg2$GeneRatio_numeric, 4),
+  Rich_Factor = round(KEGG_selected$RichFactor, 3),
+  Associated_Genes = sapply(KEGG_selected$geneID, function(x) {
+    genes <- strsplit(x, "/")[[1]]
+    paste(head(genes, 5), collapse = ", ")
+  }),
+  stringsAsFactors = FALSE
+)
+
+write.table(summary_table, file = "KEGG_Analysis_Summary_Final.txt", 
+            sep = "\t", quote = FALSE, row.names = FALSE)
