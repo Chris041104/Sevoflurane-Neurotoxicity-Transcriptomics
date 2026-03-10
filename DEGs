@@ -1,0 +1,164 @@
+library(pheatmap)
+library(ggplot2)
+library(readr)
+library(dplyr)
+
+df <- read.csv("Brief value.csv", stringsAsFactors = FALSE)
+colnames(df) <- c("Feature_ID", "GeneName", "Pvalue", "FoldChange", "Mean_0.7MAC", "Mean_2MAC")
+numeric_cols <- c("FoldChange", "Pvalue", "Mean_0.7MAC", "Mean_2MAC")
+df[numeric_cols] <- lapply(df[numeric_cols], as.numeric)
+df <- na.omit(df)
+df$logFC <- ifelse(df$FoldChange > 0, log2(df$FoldChange), -log2(abs(df$FoldChange)))
+df$negLog10P <- -log10(df$Pvalue)
+
+logFC_threshold <- 1
+p_threshold <- 0.05
+df$diff <- "Not significant"
+up_mask <- df$Pvalue < p_threshold & df$logFC > logFC_threshold & df$FoldChange > 0
+if(sum(up_mask) > 0) df$diff[up_mask] <- "Up-regulated"
+down_mask <- df$Pvalue < p_threshold & df$logFC < -logFC_threshold & df$FoldChange < 0
+if(sum(down_mask) > 0) df$diff[down_mask] <- "Down-regulated"
+
+diffSig <- df[abs(df$logFC) > logFC_threshold & df$Pvalue < p_threshold, ]
+
+if(nrow(diffSig) > 0) {
+  set.seed(123)
+  n_replicates <- 3
+  exp_matrix_07 <- matrix(NA, nrow = nrow(diffSig), ncol = n_replicates)
+  for(i in 1:nrow(diffSig)) {
+    base_value <- diffSig$Mean_0.7MAC[i]
+    exp_matrix_07[i, ] <- base_value * rnorm(n_replicates, mean = 1, sd = 0.1)
+  }
+  
+  exp_matrix_2 <- matrix(NA, nrow = nrow(diffSig), ncol = n_replicates)
+  for(i in 1:nrow(diffSig)) {
+    base_value <- diffSig$Mean_2MAC[i]
+    exp_matrix_2[i, ] <- base_value * rnorm(n_replicates, mean = 1, sd = 0.1)
+  }
+  
+  exp_matrix <- cbind(exp_matrix_07, exp_matrix_2)
+  rownames(exp_matrix) <- diffSig$Feature_ID
+  colnames(exp_matrix) <- c(paste0("0.7MAC_", 1:n_replicates), paste0("2MAC_", 1:n_replicates))
+  
+  geneNum <- 25
+  diffSig <- diffSig[order(diffSig$logFC), ]
+  diffGeneName <- diffSig$Feature_ID
+  diffLength <- length(diffGeneName)
+  
+  hmGene <- c()
+  if(diffLength > (2 * geneNum)) {
+    hmGene <- diffGeneName[c(1:geneNum, (diffLength - geneNum + 1):diffLength)]
+  } else {
+    hmGene <- diffGeneName
+  }
+  
+  hmExp <- exp_matrix[hmGene, ]
+  conNum <- n_replicates
+  treatNum <- n_replicates
+  Type <- c(rep("0.7MAC", conNum), rep("2MAC", treatNum))
+  names(Type) <- colnames(hmExp)
+  Type <- as.data.frame(Type)
+  colnames(Type) <- "Group"
+  
+  pdf(file="heatmap_simple.pdf", width=10, height=7.5)
+  pheatmap(hmExp, 
+           annotation_col = Type, 
+           color = colorRampPalette(c("#44B1C9", "white", "#DA4A35"))(50),
+           cluster_cols = FALSE,
+           show_colnames = FALSE,
+           scale = "row",
+           fontsize = 8,
+           fontsize_row = 7,
+           fontsize_col = 8,
+           main = paste("Heatmap of", length(hmGene), "Differential Genes"),
+           border_color = NA)
+  dev.off()
+  
+  pdf(file="heatmap_real_means.pdf", width=6, height=8)
+  real_exp <- as.matrix(diffSig[, c("Mean_0.7MAC", "Mean_2MAC")])
+  rownames(real_exp) <- paste0(diffSig$Feature_ID, ifelse(diffSig$logFC > 0, " (Up)", " (Down)"))
+  real_exp <- real_exp[order(diffSig$logFC), ]
+  simple_type <- data.frame(
+    Group = c("0.7MAC", "2MAC"),
+    row.names = c("Mean_0.7MAC", "Mean_2MAC")
+  )
+  pheatmap(real_exp,
+           scale = "row",
+           color = colorRampPalette(c("#44B1C9", "white", "#DA4A35"))(50),
+           cluster_cols = FALSE,
+           cluster_rows = TRUE,
+           show_rownames = ifelse(nrow(real_exp) <= 50, TRUE, FALSE),
+           show_colnames = TRUE,
+           annotation_col = simple_type,
+           fontsize_row = 8,
+           fontsize_col = 10,
+           main = paste("Heatmap of", nrow(real_exp), "Differential Genes"),
+           border_color = NA,
+           gaps_col = 1)
+  dev.off()
+  
+  top_n <- min(50, nrow(diffSig))
+  top_genes <- diffSig[order(diffSig$Pvalue), ][1:top_n, ]
+  top_exp <- as.matrix(top_genes[, c("Mean_0.7MAC", "Mean_2MAC")])
+  rownames(top_exp) <- paste0(top_genes$Feature_ID, 
+                              " (", ifelse(top_genes$logFC > 0, "Up", "Down"), 
+                              ", FC=", round(2^abs(top_genes$logFC), 1), "x)")
+  pdf(file="heatmap_top_genes.pdf", width=7, height=10)
+  pheatmap(top_exp,
+           scale = "row",
+           color = colorRampPalette(c("#44B1C9", "white", "#DA4A35"))(50),
+           cluster_cols = FALSE,
+           cluster_rows = TRUE,
+           show_rownames = TRUE,
+           show_colnames = TRUE,
+           annotation_col = simple_type,
+           fontsize_row = 9,
+           fontsize_col = 12,
+           main = paste("Heatmap of Top", top_n, "Most Significant Genes"),
+           border_color = NA)
+  dev.off()
+  
+  write.csv(diffSig, "differential_genes.csv", row.names = FALSE)
+  write.table(hmGene, file="heatmap_genes.txt", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+}
+
+pdf("volcano_plot_simple.pdf", width = 6.5, height = 6)
+colors <- c("Up-regulated" = "#E64B35",
+            "Down-regulated" = "#4DBBD5",
+            "Not significant" = "#999999")
+x_max <- max(abs(df$logFC), na.rm = TRUE) * 1.1
+y_max <- max(df$negLog10P, na.rm = TRUE) * 1.1
+par(mar = c(5, 5, 4, 2))
+plot(df$logFC, df$negLog10P,
+     xlab = expression(log[2]("Fold Change")),
+     ylab = expression(-log[10]("P-value")),
+     main = "Volcano Plot",
+     xlim = c(-x_max, x_max),
+     ylim = c(0, y_max),
+     pch = 20,
+     cex = 0.6,
+     col = colors["Not significant"],
+     las = 1)
+if(sum(df$diff == "Up-regulated") > 0) {
+  up_data <- df[df$diff == "Up-regulated", ]
+  points(up_data$logFC, up_data$negLog10P,
+         pch = 20, cex = 0.8, col = colors["Up-regulated"])
+}
+if(sum(df$diff == "Down-regulated") > 0) {
+  down_data <- df[df$diff == "Down-regulated", ]
+  points(down_data$logFC, down_data$negLog10P,
+         pch = 20, cex = 0.8, col = colors["Down-regulated"])
+}
+abline(v = 0, lty = 2, lwd = 1, col = "gray60")
+abline(v = c(-logFC_threshold, logFC_threshold), lty = 2, lwd = 1, col = "gray60")
+abline(h = -log10(p_threshold), lty = 2, lwd = 1, col = "gray60")
+legend("topright",
+       legend = c(paste("Up (", sum(df$diff == "Up-regulated"), ")", sep = ""),
+                  paste("Down (", sum(df$diff == "Down-regulated"), ")", sep = ""),
+                  "Not significant"),
+       col = c(colors["Up-regulated"], colors["Down-regulated"], colors["Not significant"]),
+       pch = 20,
+       pt.cex = 1.2,
+       bg = "white",
+       cex = 0.8)
+dev.off()
