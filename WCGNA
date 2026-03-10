@@ -1,0 +1,434 @@
+# 安装必要的R包（如果需要）
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install(c("GO.db", "preprocessCore", "impute", "limda"), force = TRUE)
+
+#install.packages(c("matrixStats", "Hmisc", "foreach", "doParallel", "fastcluster", 
+#                   "dynamicTreeCut", "survival", "WGCNA", "openxlsx"))
+
+# 加载R包
+library(limma)
+library(WGCNA)
+library(openxlsx)
+
+# 设置工作目录
+setwd("/Volumes/LENOVO/Thesis 5")
+
+# 读取Excel文件
+data_raw <- read.xlsx("Exp_details.xlsx", sheet = 1)
+
+# 查看数据结构
+head(data_raw)
+dim(data_raw)
+colnames(data_raw)  # 查看所有列名
+
+# 提取表达矩阵 - 只保留0.7MAC和2MAC的样本（共6个样本）
+# 根据实际输出，列名是"0.7MAC.-.1"、"0.7MAC.-.2"等格式
+expr_cols <- c("0.7MAC.-.1", "0.7MAC.-.2", "0.7MAC.-.3", 
+               "2MAC.-.1", "2MAC.-.2", "2MAC.-.3")
+
+# 检查列是否存在
+available_cols <- expr_cols[expr_cols %in% colnames(data_raw)]
+cat("找到的样本列:", paste(available_cols, collapse = ", "), "\n")
+
+if (length(available_cols) == 0) {
+  # 如果没找到，尝试其他可能的列名格式
+  cat("尝试其他列名格式...\n")
+  
+  # 方法1：包含点号的格式
+  possible_cols <- grep("0.7MAC|2MAC", colnames(data_raw), value = TRUE)
+  cat("包含MAC的列:", paste(possible_cols, collapse = ", "), "\n")
+  
+  # 如果有找到，使用这些列
+  if (length(possible_cols) >= 6) {
+    available_cols <- possible_cols
+  } else {
+    stop("无法找到0.7MAC和2MAC的样本列")
+  }
+}
+
+# 提取表达数据
+expr_data <- data_raw[, available_cols, drop = FALSE]
+rownames(expr_data) <- data_raw$Gene.ID  # 使用Gene ID作为行名
+
+# 转换为矩阵
+expr_matrix <- as.matrix(expr_data)
+dimnames(expr_matrix) <- list(rownames(expr_matrix), colnames(expr_matrix))
+
+# 检查数据分布
+cat("数据范围:\n")
+print(summary(as.vector(expr_matrix)))
+
+# 去除低表达的基因：使用rowMeans > 0.5（参考代码的标准）
+keep_genes <- rowMeans(expr_matrix) > 0.5
+cat("保留基因的条件: rowMeans > 0.5\n")
+cat("保留的基因数量:", sum(keep_genes, na.rm = TRUE), "\n")
+cat("去除的低表达基因数量:", sum(!keep_genes, na.rm = TRUE), "\n")
+
+expr_matrix <- expr_matrix[keep_genes, , drop = FALSE]
+dim(expr_matrix)
+
+# 创建样本信息 - 用于后续的性状分析
+sample_names <- colnames(expr_matrix)
+group_info <- data.frame(
+  Sample = sample_names,
+  Condition = ifelse(grepl("0.7MAC", sample_names), "lowMAC", "highMAC"),
+  Group_num = ifelse(grepl("0.7MAC", sample_names), 0, 1)  # 0.7MAC=0, 2MAC=1
+)
+rownames(group_info) <- sample_names
+print(group_info)
+
+# 转置数据：WGCNA需要样本为行，基因为列
+datExpr0 <- t(expr_matrix)
+
+# 确保数据是数值型
+datExpr0 <- as.matrix(datExpr0)
+storage.mode(datExpr0) <- "numeric"
+
+# 检查缺失值
+gsg <- goodSamplesGenes(datExpr0, verbose = 3)
+gsg$allOK
+if (!gsg$allOK) {
+  if (sum(!gsg$goodGenes) > 0)
+    printFlush(paste("Removing genes:", paste(names(datExpr0)[!gsg$goodGenes], collapse = ", ")))
+  if (sum(!gsg$goodSamples) > 0)
+    printFlush(paste("Removing samples:", paste(rownames(datExpr0)[!gsg$goodSamples], collapse = ", ")))
+  datExpr0 <- datExpr0[gsg$goodSamples, gsg$goodGenes]
+}
+
+# 样本聚类 - 检查离群值
+sampleTree <- hclust(dist(datExpr0), method = "average")
+pdf(file = "1_sample_cluster.pdf", width = 12, height = 9)
+par(cex = 0.6)
+par(mar = c(0, 4, 2, 0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub = "", xlab = "", 
+     cex.lab = 1.5, cex.axis = 1.5, cex.main = 2)
+# 添加颜色标记
+sample_colors <- ifelse(grepl("0.7MAC", sample_names), "blue", "red")
+colored_branches <- sample_colors[sampleTree$order]
+dev.off()
+
+# 根据聚类结果，设置cutHeight删除离群样本
+# 可以根据实际聚类图调整cutHeight
+cutHeight <- 150  # 可以根据实际聚类图调整
+pdf(file = "1_sample_cluster_with_cut.pdf", width = 12, height = 9)
+par(cex = 0.6)
+par(mar = c(0, 4, 2, 0))
+plot(sampleTree, main = "Sample clustering with cut line", sub = "", xlab = "", 
+     cex.lab = 1.5, cex.axis = 1.5, cex.main = 2)
+abline(h = cutHeight, col = "red")
+dev.off()
+
+# 如果需要删除离群样本，取消下面的注释
+# clust <- cutreeStatic(sampleTree, cutHeight = cutHeight, minSize = 5)
+# table(clust)
+# keepSamples <- (clust == 1)
+# datExpr0 <- datExpr0[keepSamples, ]
+# group_info <- group_info[rownames(datExpr0), ]
+
+# 构建自动化网络和检测模块
+# 选择软阈值
+enableWGCNAThreads()
+powers <- c(1:20)
+sft <- pickSoftThreshold(datExpr0, powerVector = powers, verbose = 5)
+
+pdf(file = "2_scale_independence.pdf", width = 9, height = 5)
+par(mfrow = c(1, 2))
+cex1 <- 0.9
+
+# 拟合指数与power值散点图
+plot(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)", ylab = "Scale Free Topology Model Fit,signed R^2",
+     type = "n", main = paste("Scale independence"))
+text(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = powers, cex = cex1, col = "red")
+abline(h = 0.85, col = "red")  # 使用0.85作为阈值
+
+# 平均连通性与power值散点图
+plot(sft$fitIndices[, 1], sft$fitIndices[, 5],
+     xlab = "Soft Threshold (power)", ylab = "Mean Connectivity", 
+     type = "n", main = paste("Mean connectivity"))
+text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels = powers, cex = cex1, col = "red")
+dev.off()
+
+# 查看最佳power值
+sft
+softPower <- sft$powerEstimate
+if (is.na(softPower)) {
+  # 如果自动估计失败，手动选择
+  # 对于6个样本，通常选择较低的power值
+  nSamples <- nrow(datExpr0)
+  if (nSamples < 10) {
+    softPower <- 9
+  } else if (nSamples < 15) {
+    softPower <- 8
+  } else {
+    softPower <- 7
+  }
+  cat("自动估计失败，手动选择power =", softPower, "\n")
+}
+softPower
+
+# 构建邻接矩阵
+adjacency <- adjacency(datExpr0, power = softPower)
+
+# 计算TOM矩阵
+TOM <- TOMsimilarity(adjacency)
+dissTOM <- 1 - TOM
+
+# 基因聚类
+geneTree <- hclust(as.dist(dissTOM), method = "average")
+pdf(file = "3_gene_clustering.pdf", width = 12, height = 9)
+plot(geneTree, xlab = "", sub = "", main = "Gene clustering on TOM-based dissimilarity",
+     labels = FALSE, hang = 0.04)
+dev.off()
+
+# 动态剪切模块识别
+# 模块基因数目 - 根据基因总数调整
+minModuleSize <- max(30, floor(ncol(datExpr0) * 0.01))  # 至少30个基因，或基因数的1%
+dynamicMods <- cutreeDynamic(dendro = geneTree, distM = dissTOM,
+                             deepSplit = 2, pamRespectsDendro = FALSE,
+                             minClusterSize = minModuleSize)
+table(dynamicMods)
+dynamicColors <- labels2colors(dynamicMods)
+table(dynamicColors)
+
+pdf(file = "4_Dynamic_Tree.pdf", width = 8, height = 6)
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "Gene dendrogram and module colors")
+dev.off()
+
+# 计算模块特征基因
+MEList <- moduleEigengenes(datExpr0, colors = dynamicColors)
+MEs <- MEList$eigengenes
+MEDiss <- 1 - cor(MEs)
+METree <- hclust(as.dist(MEDiss), method = "average")
+
+pdf(file = "5_Clustering_module.pdf", width = 7, height = 7)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+MEDissThres <- 0.25  # 剪切高度，可调整
+abline(h = MEDissThres, col = "red")
+dev.off()
+
+# 相似模块合并
+merge <- mergeCloseModules(datExpr0, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+mergedColors <- merge$colors
+mergedMEs <- merge$newMEs
+
+pdf(file = "6_merged_dynamic.pdf", width = 8, height = 6)
+plotDendroAndColors(geneTree, mergedColors, "Merged modules",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "Gene dendrogram and module colors (merged)")
+dev.off()
+
+moduleColors <- mergedColors
+table(moduleColors)
+MEs <- mergedMEs
+
+# 创建性状数据 - 使用分组信息
+datTraits <- data.frame(
+  Condition = group_info[rownames(MEs), "Group_num"]  # 0=0.7MAC, 1=2MAC
+)
+rownames(datTraits) <- rownames(MEs)
+names(datTraits) <- "Condition"
+
+# 模块-性状相关性分析
+nGenes <- ncol(datExpr0)
+nSamples <- nrow(datExpr0)
+
+moduleTraitCor <- cor(MEs, datTraits, use = "p")
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+
+pdf(file = "7_Module_trait.pdf", width = 6.5, height = max(5.5, ncol(MEs)*0.4))
+textMatrix <- paste(signif(moduleTraitCor, 2), "\n(",
+                    signif(moduleTraitPvalue, 1), ")", sep = "")
+dim(textMatrix) <- dim(moduleTraitCor)
+par(mar = c(5, max(8, ncol(MEs)*0.8), 3, 3))
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1, 1),
+               main = paste("Module-trait relationships"))
+dev.off()
+
+# 创建基因信息表
+probes <- colnames(datExpr0)
+geneInfo0 <- data.frame(
+  Feature.ID = data_raw[match(probes, data_raw$Gene.ID), "Feature.ID"],
+  Gene.ID = probes,
+  moduleColor = moduleColors
+)
+
+# 添加各组的平均表达值
+# 提取0.7MAC和2MAC的原始数据
+mac0.7_cols <- grep("0.7MAC", colnames(data_raw), value = TRUE)
+mac2_cols <- grep("2MAC", colnames(data_raw), value = TRUE)
+
+if (length(mac0.7_cols) > 0) {
+  mac0.7_data <- data_raw[match(probes, data_raw$Gene.ID), mac0.7_cols, drop = FALSE]
+  geneInfo0$MAC0.7_mean <- rowMeans(mac0.7_data, na.rm = TRUE)
+} else {
+  geneInfo0$MAC0.7_mean <- NA
+}
+
+if (length(mac2_cols) > 0) {
+  mac2_data <- data_raw[match(probes, data_raw$Gene.ID), mac2_cols, drop = FALSE]
+  geneInfo0$MAC2_mean <- rowMeans(mac2_data, na.rm = TRUE)
+} else {
+  geneInfo0$MAC2_mean <- NA
+}
+
+geneInfo0$Log2FC <- log2(geneInfo0$MAC2_mean + 1) - log2(geneInfo0$MAC0.7_mean + 1)
+
+# 按模块颜色排序
+geneOrder <- order(geneInfo0$moduleColor)
+geneInfo <- geneInfo0[geneOrder, ]
+write.table(geneInfo, file = "module_all.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+# 输出每个模块的基因
+for (mod in 1:nrow(table(moduleColors))) {
+  modules <- names(table(moduleColors))[mod]
+  inModule <- (moduleColors == modules)
+  modGenes <- probes[inModule]
+  
+  modInfo <- geneInfo0[geneInfo0$Gene.ID %in% modGenes, ]
+  write.table(modInfo, file = paste0("module_", modules, ".txt"), 
+              sep = "\t", row.names = FALSE, quote = FALSE)
+}
+
+# 计算基因显著性(GS)和模块隶属度(MM)
+modNames <- substring(names(MEs), 3)
+geneModuleMembership <- as.data.frame(cor(datExpr0, MEs, use = "p"))
+MMPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) <- paste("MM", modNames, sep = "")
+names(MMPvalue) <- paste("p.MM", modNames, sep = "")
+
+geneTraitSignificance <- as.data.frame(cor(datExpr0, datTraits, use = "p"))
+GSPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) <- paste("GS.", names(datTraits), sep = "")
+names(GSPvalue) <- paste("p.GS.", names(datTraits), sep = "")
+
+# 对每个模块绘制GS vs MM图并筛选核心基因
+for (module_color in unique(moduleColors)) {
+  column <- match(module_color, modNames)
+  if (!is.na(column)) {
+    moduleGenes <- moduleColors == module_color
+    module_gene_count <- sum(moduleGenes)
+    
+    if (module_gene_count > 5) {  # 只对基因数大于5的模块绘图
+      pdf(file = paste0("8_", module_color, "_module_GS_MM.pdf"), width = 7, height = 7)
+      verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                         abs(geneTraitSignificance[moduleGenes, 1]),
+                         xlab = paste("Module Membership in", module_color, "module"),
+                         ylab = "Gene significance for Condition (0.7MAC vs 2MAC)",
+                         main = paste("Module membership vs. gene significance\n", 
+                                      module_color, "module (", module_gene_count, "genes)"),
+                         cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module_color)
+      dev.off()
+    }
+    
+    # 筛选核心基因
+    datMM <- cbind(geneModuleMembership[moduleGenes, paste("MM", module_color, sep = ""), drop = FALSE], 
+                   geneTraitSignificance[moduleGenes, 1, drop = FALSE])
+    colnames(datMM) <- c(paste("MM", module_color, sep = ""), "GS")
+    
+    # 使用参考代码的阈值
+    geneSigFilter <- 0.15
+    moduleSigFilter <- 0.4
+    
+    datMM_filtered <- datMM[abs(datMM$GS) > geneSigFilter & abs(datMM[, 1]) > moduleSigFilter, , drop = FALSE]
+    
+    if (nrow(datMM_filtered) > 0) {
+      hub_genes <- data.frame(
+        Gene.ID = rownames(datMM_filtered),
+        MM = round(datMM_filtered[, 1], 4),
+        GS = round(datMM_filtered$GS, 4),
+        Module = module_color
+      )
+      
+      # 添加注释信息
+      feature_match <- data_raw[match(hub_genes$Gene.ID, data_raw$Gene.ID), "Feature.ID"]
+      hub_genes$Feature.ID <- feature_match
+      
+      # 添加平均表达值和log2FC
+      hub_genes$MAC0.7_mean <- round(geneInfo0[match(hub_genes$Gene.ID, geneInfo0$Gene.ID), "MAC0.7_mean"], 2)
+      hub_genes$MAC2_mean <- round(geneInfo0[match(hub_genes$Gene.ID, geneInfo0$Gene.ID), "MAC2_mean"], 2)
+      hub_genes$Log2FC <- round(geneInfo0[match(hub_genes$Gene.ID, geneInfo0$Gene.ID), "Log2FC"], 4)
+      
+      # 按GS绝对值排序
+      hub_genes <- hub_genes[order(-abs(hub_genes$GS)), ]
+      
+      write.table(hub_genes, 
+                  file = paste0("hubGenes_", module_color, ".txt"),
+                  sep = "\t", row.names = FALSE, quote = FALSE)
+      
+      cat("模块", module_color, "筛选出", nrow(hub_genes), "个核心基因\n")
+    }
+  }
+}
+
+# 计算每个基因的差异表达
+geneInfo0$absLog2FC <- abs(geneInfo0$Log2FC)
+geneInfo0 <- geneInfo0[order(-geneInfo0$absLog2FC), ]
+
+# 输出top差异基因
+top_diff_genes <- geneInfo0[1:min(100, nrow(geneInfo0)), ]
+write.table(top_diff_genes, file = "top100_diff_genes.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+# 输出模块统计信息
+module_stats <- as.data.frame(table(moduleColors))
+colnames(module_stats) <- c("Module", "Gene_Count")
+
+# 添加模块与性状的相关性
+module_stats$Correlation_with_Condition <- moduleTraitCor[match(paste0("ME", module_stats$Module), rownames(moduleTraitCor)), "Condition"]
+module_stats$Pvalue <- moduleTraitPvalue[match(paste0("ME", module_stats$Module), rownames(moduleTraitPvalue)), "Condition"]
+
+# 按相关性绝对值排序
+module_stats <- module_stats[order(-abs(module_stats$Correlation_with_Condition)), ]
+write.table(module_stats, file = "module_statistics.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+# 输出分析总结
+sink("WGCNA_analysis_summary.txt")
+cat("WGCNA Analysis Summary\n")
+cat("=====================\n\n")
+cat("Analysis date:", date(), "\n")
+cat("Data file: Exp_details.xlsx\n")
+cat("Samples analyzed:", paste(rownames(datExpr0), collapse = ", "), "\n")
+cat("Number of samples:", nSamples, "\n")
+cat("Number of genes analyzed (after low expression filter):", nGenes, "\n")
+cat("Low expression filter: rowMeans > 0.5\n")
+cat("Soft threshold power used:", softPower, "\n")
+cat("Number of modules detected:", length(unique(moduleColors)), "\n")
+cat("\nModule statistics:\n")
+print(module_stats)
+cat("\nTop 10 hub genes (by |GS|) across all modules:\n")
+
+# 收集所有模块的核心基因
+all_hub_genes <- data.frame()
+for (module_color in unique(moduleColors)) {
+  hub_file <- paste0("hubGenes_", module_color, ".txt")
+  if (file.exists(hub_file)) {
+    hub_data <- read.table(hub_file, header = TRUE, sep = "\t")
+    all_hub_genes <- rbind(all_hub_genes, hub_data)
+  }
+}
+if (nrow(all_hub_genes) > 0) {
+  all_hub_genes <- all_hub_genes[order(-abs(all_hub_genes$GS)), ]
+  print(head(all_hub_genes[, c("Feature.ID", "Gene.ID", "Module", "GS", "Log2FC")], 10))
+}
+sink()
+
+print("WGCNA analysis completed successfully!")
+print(paste("Total genes analyzed:", nGenes))
+print(paste("Number of modules found:", length(unique(moduleColors))))
+
